@@ -245,6 +245,7 @@ def compute_predictions_and_gt(model, generator, steps,
         ValueError: In case the generator yields
             data in an invalid format.
     """
+    #steps=batch_steps
     steps_done = 0
     all_outs = []
     all_labels = []
@@ -268,7 +269,7 @@ def compute_predictions_and_gt(model, generator, steps,
                                  str(generator_output))
         else:
             raise ValueError('Output not valid for current evaluation')
-
+        #Model produces two outputs: steering angle and collision probability.outs is a list of tuples
         outs = model.predict_on_batch(x)
         if not isinstance(outs, list):
             outs = [outs]
