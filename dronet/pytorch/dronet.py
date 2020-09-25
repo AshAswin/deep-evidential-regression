@@ -34,13 +34,6 @@ class SteeringAngleDataset(Dataset):
         self.exp_type = []
 
 
-    def __len__(self):
-        return self.samples
-
-    def __getitem__(self, idx):
-        if torch.is_tensor(idx):
-            idx = idx.tolist()
-
         '''First count how many experiments/folders are out there. Experiments/set of images corresponding
         to steering angle prediction and collision classification are considered together
         '''
@@ -55,9 +48,6 @@ class SteeringAngleDataset(Dataset):
             subpath = os.path.join(self.root_dir, subdir)
             self._decode_experiment_dir(subpath)
 
-        # Conversion of list into array
-        #a single groundtruth array which contains labels of the images loaded.
-        # Nature of the labels(integer or float probably decides their correspondence)
         self.ground_truth = np.array(self.ground_truth, dtype = np.float)
 
         assert self.samples > 0, "Did not find any data"
@@ -65,13 +55,20 @@ class SteeringAngleDataset(Dataset):
         print('Found {} images belonging to {} experiments.'.format(
                 self.samples, self.num_experiments))
 
-        # img_name = os.path.join(self.root_dir,
-        #                         self.landmarks_frame.iloc[idx, 0])
+    def __len__(self):
+        return self.samples
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        # Conversion of list into array
+        #a single groundtruth array which contains labels of the images loaded.
+        # Nature of the labels(integer or float probably decides their correspondence)
+
+
         img_name = self.filenames[idx]
         image = io.imread(img_name)
-        print(type(image))
-        # landmarks = self.landmarks_frame.iloc[idx, 1:]
-        # landmarks = np.array([landmarks])
         label = self.ground_truth[idx]
         label=np.float(label)
         sample = {'image': image, 'label': label}
@@ -138,7 +135,7 @@ class ResidualBlock(nn.Module):
         self.conv1 = torch.nn.Conv2d(in_planes,planes,(3,3),stride=(2,2),padding=(1,1))
         self.bn2 = torch.nn.BatchNorm2d(planes)
         self.conv2 = torch.nn.Conv2d(planes,planes,(3,3),stride=(1,1),padding=(1,1))
-        self.conv3 = torch.nn.Conv2d(planes,planes,(1,1),stride=(2,2),padding=(0,0))
+        self.conv3 = torch.nn.Conv2d(in_planes,planes,(1,1),stride=(2,2),padding=(0,0))
 
     def forward(self, input):
         residual = input
@@ -146,113 +143,130 @@ class ResidualBlock(nn.Module):
         output = self.conv1(self.act_fn(self.bn1(input)))
         output = self.conv2(self.act_fn(self.bn2(output)))
 
-        output = self.conv3(output)
+        residual = self.conv3(residual)
         output += residual
         return output
 
 class Dronet(pl.LightningModule):
 
-  def __init__(self,input_channels = 3, output_dims = 1):
-    super(Dronet, self).__init__()
-    self.input_channels = input_channels
-    self.act_fn = torch.nn.ReLU()
-    self.conv1 = torch.nn.Conv2d(self.input_channels,32,(5,5),stride=(2,2),padding=(2,2))
-    self.max_pool = torch.nn.MaxPool2d(kernel_size=(3,3),stride=(2,2))
+    def __init__(self,input_channels = 1, output_dims = 1,data_dir = os.getcwd()):
+        super(Dronet, self).__init__()
+        self.input_channels = input_channels
+        self.act_fn = torch.nn.ReLU()
+        self.conv1 = torch.nn.Conv2d(self.input_channels,32,(5,5),stride=(2,2),padding=(2,2))
+        self.max_pool = torch.nn.MaxPool2d(kernel_size=(3,3),stride=(2,2))
 
-    # Residual blocks
-    self.res_block1 = ResidualBlock(in_planes=32, planes=32)
-    self.res_block2 = ResidualBlock(in_planes=32, planes=64)
-    self.res_block3 = ResidualBlock(in_planes=64, planes=128)
+        # Residual blocks
+        self.res_block1 = ResidualBlock(in_planes=32, planes=32)
+        self.res_block2 = ResidualBlock(in_planes=32, planes=64)
+        self.res_block3 = ResidualBlock(in_planes=64, planes=128)
 
-    self.dropout = torch.nn.Dropout(0.5)
-    self.fc = torch.nn.Linear(6272,output_dims)
+        self.dropout = torch.nn.Dropout(0.5)
+        self.fc = torch.nn.Linear(6272,output_dims)
 
-  def forward(self, input):
-    batch_size, channels, width, height = input.size()
-    input = self.conv1(input)
-    input = self.max_pool(input)
+        self.data_dir = data_dir
 
-    #Residual blocks
-    input = self.res_block1(input)
-    input = self.res_block2(input)
-    input = self.res_block3(input)
+    def forward(self, input):
+        batch_size, channels, width, height = input.size()
+        input = self.conv1(input)
+        input = self.max_pool(input)
 
-    input = torch.flatten(input)
-    input = self.act_fn(input)
-    input = self.dropout(input)
-    output = self.fc(input)
+        #Residual blocks
+        input = self.res_block1(input)
+        input = self.res_block2(input)
+        input = self.res_block3(input)
 
-    return output
+        input = torch.flatten(input)
+        input = self.act_fn(input)
+        input = self.dropout(input)
+        #This is to group feature of an image in the second dimension
+        input = input.view(-1,6272)
+        output = self.fc(input)
 
-  def mse_loss(self, prediction, target):
-    #defining the loss function
-    return F.mse_loss(prediction,target)
+        return output
 
-  def training_step(self, train_batch, batch_idx):
-    #Use of loss and output labels
-    inputs, targets = train_batch
-    predictions = self.forward(inputs)
-    loss = self.mse_loss(predictions, targets)
-    logs = {'train_loss': loss}
-    return {'loss': loss, 'log': logs}
+    def mse_loss(self, prediction, target):
+        #defining the loss function
+        return F.mse_loss(prediction,target)
 
-  def validation_step(self, val_batch, batch_idx):
-    inputs, targets = val_batch
-    predictions = self.forward(inputs)
-    loss = self.mse_loss(predictions, targets)
-    return {'val_loss': loss}
+    def training_step(self, train_batch, batch_idx):
+        #Use of loss and output labels
+        inputs, targets = train_batch['image'], train_batch['label']
+        targets = targets.float()
+        predictions = self.forward(inputs)
+        loss = self.mse_loss(predictions, targets)
+        logs = {'train_loss': loss}
+        return {'loss': loss, 'log': logs}
 
-  def validation_epoch_end(self, outputs):
-    # called at the end of the validation epoch
-    # outputs is an array with what you returned in validation_step for each batch
-    # outputs = [{'loss': batch_0_loss}, {'loss': batch_1_loss}, ..., {'loss': batch_n_loss}]
-    avg_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
-    tensorboard_logs = {'val_loss': avg_loss}
-    return {'avg_val_loss': avg_loss, 'log': tensorboard_logs}
+    def validation_step(self, val_batch, batch_idx):
+        inputs, targets = val_batch['image'], val_batch['label']
+        predictions = self.forward(inputs)
+        loss = self.mse_loss(predictions, targets)
+        return {'val_loss': loss}
 
-  def prepare_data(self):
-      pass
-    # transforms for images
-    # transform=transforms.Compose([transforms.ToTensor(),
-    #                               transforms.Normalize((0.1307,), (0.3081,))])
-    #
-    # # prepare transforms standard to MNIST
-    # mnist_train = MNIST(os.getcwd(), train=True, download=True, transform=transform)
-    # mnist_test = MNIST(os.getcwd(), train=False, download=True, transform=transform)
-    #
-    # self.mnist_train, self.mnist_val = random_split(mnist_train, [55000, 5000])
+    def validation_epoch_end(self, outputs):
+        # called at the end of the validation epoch
+        # outputs is an array with what you returned in validation_step for each batch
+        # outputs = [{'loss': batch_0_loss}, {'loss': batch_1_loss}, ..., {'loss': batch_n_loss}]
+        avg_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
+        tensorboard_logs = {'val_loss': avg_loss}
+        return {'avg_val_loss': avg_loss, 'log': tensorboard_logs}
 
-  def train_dataloader(self):
-      pass
-    #return DataLoader(self.mnist_train, batch_size=64)
+    def prepare_data(self):
+        input_transforms = transforms.Compose([transforms.ToPILImage(),
+                                     transforms.Resize((240,320)),
+                                     transforms.CenterCrop((200,200)),
+                                     transforms.Grayscale(1)])
+        #Need to figure out how augmentation (which is applied every epoch) works in PyTorch lightning
+        augment_transforms = transforms.Compose([input_transforms,
+                                        transforms.RandomAffine(degrees=0.2,translate=(0.2,0.2))])
+        
+        normalize_image = transforms.ToTensor()
+        pre_process_transforms = transforms.Compose([input_transforms,normalize_image])
+        
 
-  def val_dataloader(self):
-      pass
-    #return DataLoader(self.mnist_val, batch_size=64)
+        self.steer_angle_data = SteeringAngleDataset(self.data_dir, transform=pre_process_transforms)
+        # self.steer_angle_val_data = SteeringAngleDataset(os.path.join(self.data_dir,'validation'),
+        #                                                  transform=pre_process_transforms)
+        # self.steer_angle_test_data = SteeringAngleDataset(os.path.join(self.data_dir,'testing'),
+        #                                                   transform=pre_process_transforms)
+        train_count, val_count, test_count = self._find_data_split(self.steer_angle_data.__len__(),
+                                                                   train_percent = 0.8,
+                                                                   val_percent = 0.1,
+                                                                   test_percent= 0.1)
+        self.steer_angle_train_data, self.steer_angle_val_data, self.steer_angle_test_data =\
+                                    random_split(self.steer_angle_data,[train_count,val_count,test_count])
 
-  def test_dataloader(self):
-      pass
-    #return DataLoader(self,mnist_test, batch_size=64)
+    def train_dataloader(self):
+        return DataLoader(self.steer_angle_train_data,batch_size=32,shuffle=True)
 
-  def configure_optimizers(self):
-    optimizer = torch.optim.Adam(self.parameters(), lr=1e-2,weight_decay=1e-5)
-    return optimizer
+    def val_dataloader(self):
+        return DataLoader(self.steer_angle_val_data,batch_size=32)
+  
 
-# train
-# model = Dronet()
-# trainer = pl.Trainer()
-#
-# trainer.fit(model)
+    def test_dataloader(self):
+        return DataLoader(self.steer_angle_test_data,batch_size=32)
+
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-2,weight_decay=1e-5)
+        return optimizer
+
+
+    def _find_data_split(self,dataset_length,train_percent = 0.8, val_percent = 0.1,test_percent= 0.1):
+        train_count = int(train_percent*dataset_length)
+        val_count = int(val_percent*dataset_length)
+        test_count = int(test_percent*dataset_length)
+        #To ensure that lengths of the splits sum upto the original dataset size
+        length_difference = dataset_length - (train_count + val_count + test_count)
+        if length_difference != 0:
+            train_count = train_count + length_difference
+        return train_count, val_count, test_count
+
 if __name__ == '__main__':
-    image_transformations = transforms.Compose([transforms.ToPILImage(),
-                                   transforms.Resize((240,320)),
-                                   transforms.CenterCrop((200,200)),
-                                   transforms.Grayscale(1)])
-    face_dataset = SteeringAngleDataset(root_dir='/home/ash/HBRS/Research/ResearchThesis/SourceCodes/'
-                                        'benchmark-uncertainty-estimation-methods-regression/Dataset/'
-                                                 'udacity_steering_angle/converted_bag/trial/',
-                                        transform=image_transformations)
-    i = face_dataset[1]
-    io.imshow(np.asarray(i['image']))
-    io.show()
-    exit(0)
+    model = Dronet(input_channels=1,output_dims=1,data_dir='/home/ash/HBRS/Research/ResearchThesis/SourceCodes/'
+                                                        'benchmark-uncertainty-estimation-methods-regression/Dataset/'
+                                                        'udacity_steering_angle/converted_bag/training')
+    trainer = pl.Trainer()
+    trainer.fit(model)
+
