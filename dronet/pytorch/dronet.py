@@ -1,9 +1,10 @@
 import numpy as np
 import torch
-from torch import nn
+from torch import nn,Tensor
 import pytorch_lightning as pl
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset, random_split
+from torch.optim.optimizer import Optimizer
 from skimage import io,transform
 from torchvision import datasets, transforms
 import os
@@ -189,6 +190,24 @@ class Dronet(pl.LightningModule):
         #defining the loss function
         return F.mse_loss(prediction,target)
 
+
+    def on_pretrain_routine_start(self) -> None:
+        for layer in self.modules():
+            print(layer)
+            if isinstance(layer, (nn.Conv2d)):
+                nn.init.kaiming_normal(layer.weight, mode='fan_in')
+
+    def on_batch_start(self,batch)-> None:
+        #tensors need to be converted to PIL Image before applying any augmentation transformations
+        tensor_PIL = transforms.ToPILImage()
+        augment_transforms = transforms.RandomAffine(degrees=0.2,translate=(0.2,0.2))
+        #After applying augmentation transformations, PIL image is again converted to tensor
+        normalize_image = transforms.ToTensor()
+        batch_transforms = transforms.Compose([tensor_PIL, augment_transforms, normalize_image])
+        #Applying transformations to images separately
+        for image_idx in (range(batch['image'].shape[0])):
+            (batch['image'])[image_idx] = batch_transforms((batch['image'])[image_idx])
+
     def training_step(self, train_batch, batch_idx):
         #Use of loss and output labels
         inputs, targets = train_batch['image'], train_batch['label']
@@ -213,19 +232,15 @@ class Dronet(pl.LightningModule):
         return {'avg_val_loss': avg_loss, 'log': tensorboard_logs}
 
     def prepare_data(self):
-        input_transforms = transforms.Compose([transforms.ToPILImage(),
+        pre_process_transforms  = transforms.Compose([transforms.ToPILImage(),
                                      transforms.Resize((240,320)),
                                      transforms.CenterCrop((200,200)),
-                                     transforms.Grayscale(1)])
+                                     transforms.Grayscale(1),
+                                    transforms.ToTensor()])
         #Need to figure out how augmentation (which is applied every epoch) works in PyTorch lightning
-        augment_transforms = transforms.Compose([input_transforms,
-                                        transforms.RandomAffine(degrees=0.2,translate=(0.2,0.2))])
-        
-        normalize_image = transforms.ToTensor()
-        pre_process_transforms = transforms.Compose([input_transforms,normalize_image])
-        
 
-        self.steer_angle_data = SteeringAngleDataset(self.data_dir, transform=pre_process_transforms)
+
+        self.steer_angle_data = SteeringAngleDataset(self.data_dir, transform = pre_process_transforms)
         # self.steer_angle_val_data = SteeringAngleDataset(os.path.join(self.data_dir,'validation'),
         #                                                  transform=pre_process_transforms)
         # self.steer_angle_test_data = SteeringAngleDataset(os.path.join(self.data_dir,'testing'),
@@ -252,6 +267,17 @@ class Dronet(pl.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-2,weight_decay=1e-5)
         return optimizer
 
+    def backward(self, trainer, loss: Tensor, optimizer: Optimizer, optimizer_idx: int) -> None:
+        #Add L2 Regularizers for Conv layers of Res blocks
+        l2_loss = torch.tensor(0, dtype=torch.float,requires_grad=True)
+        reg = 1e-4
+
+        for name, param in model.named_parameters():
+            if 'res_block' in name and 'conv' in name and 'weight' in name:
+                l2_loss = l2_loss + (0.5 * reg * torch.sum(torch.pow(param, 2)))
+
+        loss += l2_loss
+        loss.backward()
 
     def _find_data_split(self,dataset_length,train_percent = 0.8, val_percent = 0.1,test_percent= 0.1):
         train_count = int(train_percent*dataset_length)
@@ -263,10 +289,16 @@ class Dronet(pl.LightningModule):
             train_count = train_count + length_difference
         return train_count, val_count, test_count
 
+
+
+
+
 if __name__ == '__main__':
     model = Dronet(input_channels=1,output_dims=1,data_dir='/home/ash/HBRS/Research/ResearchThesis/SourceCodes/'
                                                         'benchmark-uncertainty-estimation-methods-regression/Dataset/'
                                                         'udacity_steering_angle/converted_bag/training')
+    # for layer in model.modules():
+    #     print(layer)
     trainer = pl.Trainer()
     trainer.fit(model)
 
