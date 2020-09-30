@@ -166,6 +166,8 @@ class Dronet(pl.LightningModule):
         self.fc = torch.nn.Linear(6272,output_dims)
 
         self.data_dir = data_dir
+        #Initialize convolution layer weights of residual blocks using kaiming_normal intializer
+        self.__init_res_block_conv2D()
 
     def forward(self, input):
         batch_size, channels, width, height = input.size()
@@ -190,12 +192,6 @@ class Dronet(pl.LightningModule):
         #defining the loss function
         return F.mse_loss(prediction,target)
 
-
-    def on_pretrain_routine_start(self) -> None:
-        for layer in self.modules():
-            print(layer)
-            if isinstance(layer, (nn.Conv2d)):
-                nn.init.kaiming_normal(layer.weight, mode='fan_in')
 
     def on_batch_start(self,batch)-> None:
         #tensors need to be converted to PIL Image before applying any augmentation transformations
@@ -290,15 +286,18 @@ class Dronet(pl.LightningModule):
         return train_count, val_count, test_count
 
 
-
+    def __init_res_block_conv2D(self):
+        for block in [self.res_block1,self.res_block2,self.res_block3]:
+            for layer in block.modules():
+                if isinstance(layer, (nn.Conv2d)):
+                    nn.init.kaiming_normal(layer.weight, mode='fan_in')
 
 
 if __name__ == '__main__':
     model = Dronet(input_channels=1,output_dims=1,data_dir='/home/ash/HBRS/Research/ResearchThesis/SourceCodes/'
                                                         'benchmark-uncertainty-estimation-methods-regression/Dataset/'
                                                         'udacity_steering_angle/converted_bag/training')
-    # for layer in model.modules():
-    #     print(layer)
+
     trainer = pl.Trainer()
     trainer.fit(model)
 
