@@ -7,8 +7,11 @@ from torch.utils.data import DataLoader, Dataset, random_split
 from torch.optim.optimizer import Optimizer
 from skimage import io,transform
 from torchvision import datasets, transforms
+from pytorch_lightning import metrics
 import os
 import re
+#to ensure reproducibility while splitting the dataset
+torch.manual_seed(0)
 
 class SteeringAngleDataset(Dataset):
     """Udacity steering angle dataset."""
@@ -166,6 +169,8 @@ class Dronet(pl.LightningModule):
         self.fc = torch.nn.Linear(6272,output_dims)
 
         self.data_dir = data_dir
+
+        self.metric = metrics.regression.RMSE()
         #Initialize convolution layer weights of residual blocks using kaiming_normal intializer
         self.__init_res_block_conv2D()
 
@@ -208,7 +213,11 @@ class Dronet(pl.LightningModule):
         #Use of loss and output labels
         inputs, targets = train_batch['image'], train_batch['label']
         targets = targets.float()
+        targets = torch.unsqueeze(targets,dim = 1)
         predictions = self.forward(inputs)
+
+        rmse = self.metric(predictions,targets)
+
         loss = self.mse_loss(predictions, targets)
         logs = {'train_loss': loss}
         return {'loss': loss, 'log': logs}
@@ -259,6 +268,24 @@ class Dronet(pl.LightningModule):
         return DataLoader(self.steer_angle_test_data,batch_size=32)
 
 
+    def test_step(self, test_batch, test_batch_idx):
+        inputs, targets = test_batch['image'], test_batch['label']
+        predictions = self(inputs)
+        return {'metric':self.metric(predictions,targets)}
+
+    def test_epoch_end(self, outputs):
+
+        #avg_metric = torch.stack([x['metric'] for x in outputs]).mean()
+        final_rmse = 0
+        for batch_rmse in outputs:
+            #square batch rmse and multiply by batch size to get the deviation
+            batch_rmse = (batch_rmse**2)*batch_rmse.__len__()
+            final_rmse+=batch_rmse
+
+        final_rmse = (final_rmse/outputs.__len__())**0.5
+        logs = {'rmse':final_rmse}
+        return {'rmse':final_rmse,'log':logs}
+
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-2,weight_decay=1e-5)
         return optimizer
@@ -290,7 +317,7 @@ class Dronet(pl.LightningModule):
         for block in [self.res_block1,self.res_block2,self.res_block3]:
             for layer in block.modules():
                 if isinstance(layer, (nn.Conv2d)):
-                    nn.init.kaiming_normal(layer.weight, mode='fan_in')
+                    nn.init.kaiming_normal_(layer.weight, mode='fan_in')
 
 
 if __name__ == '__main__':
@@ -298,6 +325,23 @@ if __name__ == '__main__':
                                                         'benchmark-uncertainty-estimation-methods-regression/Dataset/'
                                                         'udacity_steering_angle/converted_bag/training')
 
-    trainer = pl.Trainer()
-    trainer.fit(model)
+    path = os.path.join(os.getcwd(),'lightning_logs/version_4/checkpoints/epoch=0.ckpt')
 
+    #test_model = Dronet.load_from_checkpoint(checkpoint_path=path)
+
+
+
+    #use of callbacks is another option to handle with checkpoints
+    trainer = pl.Trainer(auto_select_gpus=True,
+                         auto_lr_find=False,#auto learning rate finder
+                         gpus=None,#number of gpus to train the model
+                         log_save_interval=100,#frequency to save logs
+                         max_epochs = 1,
+                         min_epochs = 1,
+                         reload_dataloaders_every_epoch=False,#consider using this to apply augmentation(random
+                         resume_from_checkpoint=None,         # transforms) before every epoch
+                         weights_save_path=os.getcwd()
+                         )
+
+    trainer.fit(model)
+    trainer.test()
