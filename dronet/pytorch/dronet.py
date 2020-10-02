@@ -11,8 +11,65 @@ from pytorch_lightning import metrics
 import os
 import re
 
+
 # to ensure reproducibility while splitting the dataset
 torch.manual_seed(0)
+
+# Loss Function
+class MLELoss(torch.nn.Module):
+  def __init__(self, weight=None, size_average=True):
+    super(MLELoss, self).__init__()
+
+  def forward(self, inputs, targets, smooth=1):
+
+    targets = targets.view(-1) #converting variable to single dimension
+
+    mu = inputs[:,0].view(-1) #extracting mu and sigma_2
+    logsigma_2 = inputs[:,1].view(-1) #logsigma and exp drives the variable to positive values always
+    sigma_2 = torch.exp(logsigma_2)
+
+    kl_divergence = (targets - mu)**2/sigma_2 #Regularizer
+    mse = -0.5 * torch.sum(((targets - mu)**2)/sigma_2)
+    sigma_trace = -0.5  * torch.sum(sigma_2)
+    log2pi = -0.5 *  np.log(2 * np.pi)
+    J =  mse + sigma_trace + log2pi
+
+    loss = -J + kl_divergence.sum()
+    return loss
+
+class EvidentialLoss(torch.nn.Module):
+  def __init__(self, weight=None, size_average=True):
+    super(EvidentialLoss, self).__init__()
+
+
+  def forward(self, inputs, targets, smooth=1):
+    targets = targets.view(-1)
+    y = inputs[:,0].view(-1) #first column is mu,delta, predicted value
+    loga = inputs[:,1].view(-1) #alpha
+    logb = inputs[:,2].view(-1) #beta
+    logl = inputs[:,3].view(-1) #lamda
+
+    a = torch.exp(loga)
+    b = torch.exp(logb)
+    l = torch.exp(logl)
+
+
+    term1 = (torch.exp(torch.lgamma(a - 0.5)))/(4 * torch.exp(torch.lgamma(a)) * l * torch.sqrt(b))
+    #print("term1 :", term1)
+    term2 = 2 * b *(1 + l) + (2*a - 1)*l*(y - targets)**2
+    #print("term2 :", term2)
+
+    J = term1 * term2
+    #print("J :", J)
+    Kl_divergence = torch.abs(y - targets) * (2*a + l)
+    #Kl_divergence = ((y - targets)**2) * (2*a + l)
+
+    #print ("KL ",Kl_divergence.data.numpy())
+    loss = J + Kl_divergence
+
+    #print ("loss :", loss)
+
+    return loss.mean()
 
 
 class SteeringAngleDataset(Dataset):
@@ -130,6 +187,7 @@ class SteeringAngleDataset(Dataset):
 
 
 class ResidualBlock(nn.Module):
+
     def __init__(self, in_planes, planes):
         super(ResidualBlock, self).__init__()
 
@@ -153,10 +211,15 @@ class ResidualBlock(nn.Module):
 
 class Dronet(pl.LightningModule):
 
-    def __init__(self, batch_size = 32, input_channels = 1, output_dims = 1, data_dir=os.getcwd()):
+    loss_functions = {'mse': (torch.nn.MSELoss(),1), 'mle': (MLELoss(),2),
+                    'evidential': (EvidentialLoss, 4)}
+
+    def __init__(self, batch_size = 32, input_channels = 1, output_dims = 1, loss_fn = 'mse', data_dir=os.getcwd()):
         super(Dronet, self).__init__()
         self.input_channels = input_channels
-        self.output_dims = output_dims
+
+        self.loss, self.output_dims = Dronet.loss_functions[loss_fn]
+
         self.batch_size = batch_size
         # use this to save hyperparameters along with the ckpt.
         # Note: Consider using omegaconf for configuration management
@@ -173,6 +236,8 @@ class Dronet(pl.LightningModule):
 
         self.dropout = torch.nn.Dropout(0.5)
         self.fc = torch.nn.Linear(6272, self.output_dims)
+
+
 
         self.data_dir = data_dir
 
@@ -201,10 +266,6 @@ class Dronet(pl.LightningModule):
 
         return output
 
-    def mse_loss(self, prediction, target):
-        # defining the loss function
-        return F.mse_loss(prediction, target)
-
     def on_batch_start(self, batch) -> None:
         # tensors need to be converted to PIL Image before applying any augmentation transformations
         tensor_PIL = transforms.ToPILImage()
@@ -225,7 +286,7 @@ class Dronet(pl.LightningModule):
 
         rmse = self.metric(predictions, targets)
 
-        loss = self.mse_loss(predictions, targets)
+        loss = self.loss(predictions, targets)
 
         logs = {'train_loss': loss}
         return {'loss': loss, 'log': logs}
@@ -233,7 +294,7 @@ class Dronet(pl.LightningModule):
     def validation_step(self, val_batch, batch_idx):
         inputs, targets = val_batch['image'], val_batch['label']
         predictions = self.forward(inputs)
-        loss = self.mse_loss(predictions, targets)
+        loss = self.loss(predictions, targets)
         return {'val_loss': loss}
 
     def validation_epoch_end(self, outputs):
@@ -331,33 +392,33 @@ if __name__ == '__main__':
                    '/training'
 
     #Training code
-    # model = Dronet(batch_size=32, input_channels=1, output_dims=1,  data_dir=dataset_path)
-    #
-    # #use of callbacks is another option to handle with checkpoints
-    # trainer = pl.Trainer(auto_select_gpus=True,
-    #                      auto_lr_find=False,#auto learning rate finder
-    #                      gpus=None,#number of gpus to train the model
-    #                      log_save_interval=100,#frequency to save logs
-    #                      max_epochs = 1,
-    #                      min_epochs = 1,
-    #                      reload_dataloaders_every_epoch=False,#consider using this to apply augmentation(random
-    #                      resume_from_checkpoint=None,         # transforms) before every epoch
-    #                      weights_save_path=os.getcwd()
-    #                      )
-    #
-    # trainer.fit(model)
+    model = Dronet(batch_size=32, input_channels=1, output_dims=1,  data_dir=dataset_path,loss_fn='mse')
+
+    #use of callbacks is another option to handle with checkpoints
+    trainer = pl.Trainer(auto_select_gpus=True,
+                         auto_lr_find=False,#auto learning rate finder
+                         gpus=None,#number of gpus to train the model
+                         log_save_interval=100,#frequency to save logs
+                         max_epochs = 1,
+                         min_epochs = 1,
+                         reload_dataloaders_every_epoch=False,#consider using this to apply augmentation(random
+                         resume_from_checkpoint=None,         # transforms) before every epoch
+                         weights_save_path=os.getcwd()
+                         )
+
+    trainer.fit(model)
 
     #Enable this to test immediately after training
-    # trainer.test()
+    #trainer.test()
 
     #Testing a pretrained model
 
-    ckpt_path = os.path.join(os.getcwd(), 'lightning_logs/version_0/checkpoints/epoch=0.ckpt')
-
-    #batch_size=32, input_channels=1, output_dims=1 are loaded from the ckpt file. Can be provided explicitly via
-    #load_from_checkpoint() method.
-    model_loaded = Dronet.load_from_checkpoint(checkpoint_path=ckpt_path, data_dir=dataset_path)
-
-    trainer = pl.Trainer()
-
-    trainer.test(model_loaded)
+    # ckpt_path = os.path.join(os.getcwd(), 'lightning_logs/version_0/checkpoints/epoch=0.ckpt')
+    #
+    # #batch_size=32, input_channels=1, output_dims=1 are loaded from the ckpt file. Can be provided explicitly via
+    # #load_from_checkpoint() method.
+    # model_loaded = Dronet.load_from_checkpoint(checkpoint_path=ckpt_path, data_dir=dataset_path)
+    #
+    # trainer = pl.Trainer()
+    #
+    # trainer.test(model_loaded)
